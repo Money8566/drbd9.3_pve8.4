@@ -1,0 +1,29 @@
+### Editing /etc/systemd/system/linstor-satellite.service.d/override.conf
+### Anything between here and the comment below will become the new contents of the file
+
+Type=notify
+TimeoutStartSec=infinity
+
+### Lines below this comment will be discarded
+
+### /lib/systemd/system/linstor-satellite.service
+# [Unit]
+# Description=LINSTOR Satellite Service
+# Wants=network-online.target
+# After=network-online.target
+# # if these exist, and are enabled, we want to be scheduled before them
+# # proxmox:
+# Before=pvedaemon.service
+# 
+# [Service]
+# Type=simple
+# ExecStart=/usr/share/linstor-server/bin/Satellite --logs=/var/log/linstor-satellite --config-directory=/etc/linstor
+# # send SIGTERM only to satellite, send SIGKILL to all spawned processes
+# KillMode=mixed
+# # if killed by signal 143 -> SIGTERM, 129 -> SIGHUP
+# SuccessExitStatus=0 143 129
+# User=root
+# PrivateTmp=yes
+# 
+# [Install]
+# WantedBy=multi-user.target
