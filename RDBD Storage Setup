@@ -1,0 +1,128 @@
+Setup LVM Filter:
+nano /etc/lvm/lvm.conf
+filter = [ "r|/dev/drbd0|", "a|/dev/nvme0n1|", "a|/dev/sda|", "a|/dev/sdb|", "a|/dev/sdc|", "r|.*|" ]
+
+Software and dependencies installation:  
+apt update
+apt install nvme-cli
+wget -O /tmp/linbit-keyring.deb \
+https://packages.linbit.com/public/linbit-keyring.deb
+dpkg -i /tmp/linbit-keyring.deb
+PVERS=8 && echo "deb [signed-by=/etc/apt/trusted.gpg.d/linbit-keyring.gpg] \
+http://packages.linbit.com/public/ proxmox-$PVERS drbd-9" > /etc/apt/sources.list.d/linbit.list
+apt update
+
+uname -r
+apt install pve-headers-$(uname -r) drbd-dkms drbd-utils drbd-reactor -y
+
+lsmod | grep drbd
+modinfo drbd
+
+apt install -y linstor-controller linstor-satellite linstor-client linstor-proxmox
+
+Storage Setup
+
+Encryption (luks - encryption at rest)
+
+# For EACH disk you plan to use (e.g., /dev/sdb, /dev/sdc):
+sudo sgdisk --zap-all /dev/nvme0n1  # Wipes GPT partition table, also msdos
+sudo wipefs -a /dev/nvme0n1        # Wipes all known filesystem signatures
+sudo dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=100  # Zero out start of disk
+sudo dd if=/dev/zero of=/dev/nvme0n1 bs=1M seek=$(( $(blockdev --getsz /dev/nvme0n1) - 100 )) count=100 # Zero out end of disk
+
+apt install cryptsetup -y
+
+# For EACH disk you plan to use (e.g., /dev/sdb, /dev/sdc):
+sudo cryptsetup luksFormat /dev/nvme0n1
+# You will be prompted to type YES (all caps) and then set a passphrase.
+# Choose a very strong, unique passphrase. You'll only need it once if using a key file.
+
+mkdir -p /root/luks_keys
+chmod 700 /root/luks_keys
+dd if=/dev/urandom of=/root/luks_keys/hpvep3_nvme0n1.key bs=32 count=1
+# ... create one key file per physical disk you are encrypting
+chmod 400 /root/luks_keys/*.key
+
+# For EACH disk (e.g., /dev/sdb, /dev/sdc):
+sudo cryptsetup luksAddKey /dev/nvme0n1 /root/luks_keys/hpvep3_nvme0n1.key
+# You will be prompted to enter the passphrase you set during luksFormat for /dev/sdX.
+
+sudo cryptsetup open /dev/nvme0n1 luks-linstor-nvme0n1 --key-file /root/luks_keys/hpvep3_nvme0n1.key
+
+ls -l /dev/mapper/
+sudo blkid | grep nvme0n1
+
+sudo nano /etc/crypttab
+luks-linstor-nvme0n1 UUID=b07075f1-179c-4cba-aecf-e0df21d69a45 /root/luks_keys/hpvep3_nvme0n1.key luks,discard,initramfs
+
+sudo update-initramfs -u -k all
+
+sudo reboot
+
+ls -l /dev/mapper/
+sudo cryptsetup status luks-linstor-nvme0n1
+
+On 1
+scp /root/luks_keys/hpvep1_nvme0n1.key root@10.0.5.3:/root/luks_keys/
+scp /root/luks_keys/hpvep1_nvme0n1.key root@10.0.5.4:/root/luks_keys/
+
+2
+scp /root/luks_keys/hpvep2_nvme0n1.key root@10.0.5.2:/root/luks_keys/
+scp /root/luks_keys/hpvep2_nvme0n1.key root@10.0.5.4:/root/luks_keys/
+
+3
+scp /root/luks_keys/hpvep3_nvme0n1.key root@10.0.5.2:/root/luks_keys/
+scp /root/luks_keys/hpvep3_nvme0n1.key root@10.0.5.3:/root/luks_keys/
+
+On each after to set permissions
+chmod 400 /root/luks_keys/*.key
+ls -l /root/luks_keys/ # To verify
+
+Create zpools on each host for each drive:
+
+ZFS_POOL_NAME="linstor-zfs-pool"
+LUKS_MAPPED_DEVICE="/dev/mapper/luks-linstor-nvme0n1"
+sudo zpool create \
+  -o ashift=12 \
+  -O compression=lz4 \
+  -O atime=off \
+  -O xattr=sa \
+  -O acltype=posixacl \
+  -f "${ZFS_POOL_NAME}" "${LUKS_MAPPED_DEVICE}"
+sudo zfs set canmount=off "${ZFS_POOL_NAME}"
+
+Starting up cluster and configuring Linstor:
+
+if node is controller
+		systemctl enable linstor-controller --now
+		
+		linstor node list
+    linstor storage-pool list
+		linstor node create hpvep1 10.0.33.2 --node-type Combined
+		linstor node create hpvep2 10.0.33.3 --node-type Combined
+		linstor node create hpvep3 10.0.33.4 --node-type Combine
+    linstor storage-pool create zfsthin hpvep1 zfs_linstor_storage zfs_linstor_storage
+    linstor storage-pool create zfsthin hpvep2 zfs_linstor_storage zfs_linstor_storage
+    linstor storage-pool create zfsthin hpvep3 zfs_linstor_storage zfs_linstor_storage
+		linstor node list
+    linstor storage-pool list
+    linstor resource-definition create vm-disk
+    linstor volume-definition create backups 100G
+		linstor resource-group create vm-disk --storage-pool=pve-zfs-linstor-storage --place-count=3
+		linstor volume-group create vm-disk
+    linstor resource list
+
+
+Add shared storage in proxmox:
+nano /etc/pve/storage.cfg
+			
+drbd:  linstor_storage
+		content images,rootdir
+		controller 10.0.33.2,10.0.33.3,10.0.33.4
+		resourcegroup vm-disk
+
+restart services:  systemctl restart pve-cluster pvedaemon pvestatd pveproxy pve-ha-lrm
+
+Test storage creation
+
+
